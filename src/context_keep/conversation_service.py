@@ -1,12 +1,46 @@
 # src/context_keep/conversation_service.py
 
 import traceback
+import re
 from fastapi import HTTPException
+from openai import AsyncOpenAI
 from fastapi.responses import StreamingResponse
+from httpcore._exceptions import RemoteProtocolError
+
 from pydantic import BaseModel, Field
 from src.context_keep.db import ContextDB
+from tenacity import (
+    retry,
+    wait_exponential,
+    stop_after_attempt,
+    retry_if_exception_type,
+)
+
 
 MODEL = "deepseek-r1-distill-qwen-7b"
+
+
+def strip_thoughts(text: str) -> str:
+    """Removes any content between <think> and </think> tags."""
+    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+
+
+@retry(
+    wait=wait_exponential(multiplier=1, min=2, max=10),
+    stop=stop_after_attempt(3),
+    retry=retry_if_exception_type(
+        Exception
+    ),  # You can customize to a specific exception
+)
+async def stream_llm_response(
+    llm_client: AsyncOpenAI, messages: list, user_message: str
+):
+    response = await llm_client.chat.completions.create(
+        model=MODEL,
+        messages=messages + [{"role": "user", "content": user_message}],
+        stream=True,
+    )
+    return response
 
 
 class Conversation(BaseModel):
@@ -161,54 +195,71 @@ class ConversationService:
         Retrieves past events from the stored conversation, invokes the LLM,
         streams the output, and then updates the conversation.
         """
-        # Retrieve the conversation and extract the last 10 messages.
+        # Retrieve conversation and get the last 10 messages.
         conversation = await self.get_conversation(convo_id)
-        past_events = conversation.messages[-10:]  # Use last 10 messages
+        past_events = conversation.messages[-10:]
         default_system_message = {
             "role": "system",
             "content": (
-                "You are a summarization assistant. Your task is to produce a concise, final summary of the "
-                "provided conversation history. Do not include any internal reasoning or chain-of-thought details. "
-                "Simply output the clear, final summary."
+                "You are a summarization assistant. Produce a concise, final summary of the conversation "
+                "without including any internal chain-of-thought, meta-commentary, or reasoning."
             ),
         }
         messages = [{"role": "user", "content": msg} for msg in past_events]
         if mode == "summarize":
             messages.insert(0, system_msg or default_system_message)
 
-        async def _stream():
-            response = None
+        async def stream_generator():
             full_reply = ""
             try:
-                response = await self.db.async_lm_client.chat.completions.create(
-                    model=MODEL,
-                    messages=messages + [{"role": "user", "content": user_message}],
-                    stream=True,
-                )
+                # Wrap the streaming call with retry logic.
+                response = await stream_llm_response(self.db.async_lm_client, messages, user_message)
                 async for chunk in response:
                     if chunk.choices[0].delta.content:
                         text = chunk.choices[0].delta.content
-                        yield text
-                        full_reply += text
+                        print("Raw chunk:", text)  # Debug log
+                        clean_text = strip_thoughts(text)
+                        yield clean_text
+                        full_reply += clean_text
+            except RemoteProtocolError as e:
+                error_msg = f"❌ Streaming failed after retries: {e}"
+                print(error_msg)
+                traceback.print_exc()
+                # Fallback: perform a non-streaming call.
+                try:
+                    print("Falling back to non-streaming call...")
+                    non_stream_resp = await self.db.async_lm_client.chat.completions.create(
+                        model=MODEL,
+                        messages=messages + [{"role": "user", "content": user_message}],
+                        stream=False,
+                    )
+                    final_text = non_stream_resp.choices[0].message.content
+                    clean_final = strip_thoughts(final_text)
+                    yield clean_final
+                    full_reply = clean_final
+                except Exception as fallback_exc:
+                    fallback_error = f"❌ Fallback failed: {fallback_exc}"
+                    print(fallback_error)
+                    yield fallback_error
             except Exception as e:
                 error_msg = f"❌ Streaming Error: {e}"
                 print(error_msg)
                 traceback.print_exc()
                 yield error_msg
             finally:
-                if response:
-                    print(f"✅ Final AI Reply: {full_reply}")
-                    if mode == "chat":
-                        # Append the AI response to the conversation.
-                        await self.update_conversation(convo_id, full_reply)
-                    elif mode == "summarize":
-                        # Update the conversation's summary.
-                        conv = await self.get_conversation(convo_id)
-                        conv.summary = full_reply
-                        await self.store_conversation(conv)
-                        yield f"\n\n✅ Summary Updated: {full_reply}"
+                if not full_reply.strip():
+                    full_reply = "No response generated."
+                print(f"✅ Final AI Reply: {full_reply}")
+                if mode == "chat":
+                    # Instead of store_event (which uses rpush), we update the conversation.
+                    await self.update_conversation(convo_id, full_reply)
+                elif mode == "summarize":
+                    conv = await self.get_conversation(convo_id)
+                    conv.summary = full_reply
+                    await self.store_conversation(conv)
+                    yield f"\n\n✅ Summary Updated: {full_reply}"
 
-        return StreamingResponse(_stream(), media_type="text/plain")
+        return StreamingResponse(stream_generator(), media_type="text/plain")
 
 
 # For local validation (e.g. when running `python conversation_service.py`)
