@@ -21,8 +21,10 @@ MODEL = "deepseek-r1-distill-qwen-7b"
 
 
 def strip_thoughts(text: str) -> str:
-    """Removes any content between <think> and </think> tags."""
-    return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)
+    # Remove all <think>...</think> blocks.
+    cleaned = re.sub(r"<think>[\s\S]*?</think>", "", text).strip()
+    # If the cleaned result is empty, return a fallback value or the raw text.
+    return cleaned if cleaned else text
 
 
 @retry(
@@ -70,10 +72,9 @@ class ConversationService:
         await self.db.redis.set(key, conversation.json())
 
     async def get_conversation(self, convo_id: str) -> Conversation:
-        """Retrieves a conversation from Redis; if not found, returns a new one."""
         key = f"conversation:{convo_id}"
         raw_data = await self.db.redis.get(key)
-        if not raw_data:
+        if not raw_data or raw_data.strip() == "null":
             return Conversation(convo_id=convo_id, summary="", messages=[])
         return Conversation.parse_raw(raw_data)
 
@@ -190,21 +191,18 @@ class ConversationService:
         mode: str = "chat",
         system_msg: dict | None = None,
     ) -> StreamingResponse:
-        """
-        Internal method to generate a streaming response using the LLM.
-        Retrieves past events from the stored conversation, invokes the LLM,
-        streams the output, and then updates the conversation.
-        """
         # Retrieve conversation and get the last 10 messages.
         conversation = await self.get_conversation(convo_id)
         past_events = conversation.messages[-10:]
         default_system_message = {
             "role": "system",
             "content": (
-                "You are a summarization assistant. Produce a concise, final summary of the conversation "
-                "without including any internal chain-of-thought, meta-commentary, or reasoning."
+                "You are a summarization assistant. Your output must consist of only one concise final summary, "
+                "prefixed with 'Final Summary:'. Do not include any internal chain-of-thought, meta-commentary, or additional explanation. "
+                "Only output the final summary exactly as specified."
             ),
         }
+
         messages = [{"role": "user", "content": msg} for msg in past_events]
         if mode == "summarize":
             messages.insert(0, system_msg or default_system_message)
@@ -212,8 +210,9 @@ class ConversationService:
         async def stream_generator():
             full_reply = ""
             try:
-                # Wrap the streaming call with retry logic.
-                response = await stream_llm_response(self.db.async_lm_client, messages, user_message)
+                response = await stream_llm_response(
+                    self.db.async_lm_client, messages, user_message
+                )
                 async for chunk in response:
                     if chunk.choices[0].delta.content:
                         text = chunk.choices[0].delta.content
@@ -225,13 +224,15 @@ class ConversationService:
                 error_msg = f"❌ Streaming failed after retries: {e}"
                 print(error_msg)
                 traceback.print_exc()
-                # Fallback: perform a non-streaming call.
                 try:
                     print("Falling back to non-streaming call...")
-                    non_stream_resp = await self.db.async_lm_client.chat.completions.create(
-                        model=MODEL,
-                        messages=messages + [{"role": "user", "content": user_message}],
-                        stream=False,
+                    non_stream_resp = (
+                        await self.db.async_lm_client.chat.completions.create(
+                            model=MODEL,
+                            messages=messages
+                            + [{"role": "user", "content": user_message}],
+                            stream=False,
+                        )
                     )
                     final_text = non_stream_resp.choices[0].message.content
                     clean_final = strip_thoughts(final_text)
@@ -251,7 +252,6 @@ class ConversationService:
                     full_reply = "No response generated."
                 print(f"✅ Final AI Reply: {full_reply}")
                 if mode == "chat":
-                    # Instead of store_event (which uses rpush), we update the conversation.
                     await self.update_conversation(convo_id, full_reply)
                 elif mode == "summarize":
                     conv = await self.get_conversation(convo_id)
