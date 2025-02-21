@@ -18,9 +18,8 @@ dependencies = [
 ]
 
 
-[tool.setuptools]
-packages = ["context-keep"]
-package-dir = {"context-keep" = "src/context_keep/"}
+[tool.setuptools.packages.find]
+where = ["src"]  # list of folders that contain the packages (["."] by default)
 
 [dependency-groups]
 dev = [
