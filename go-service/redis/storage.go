@@ -9,6 +9,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Storage defines the methods our API depends on.
+type Storage interface {
+	StoreEvent(ctx context.Context, convoID, eventID, parentID, summary string, content []string) error
+	GetSummary(ctx context.Context, convoID string) (string, error)
+	GetRecentEvents(ctx context.Context, convoID string, count int) ([]string, error)
+	StoreSummary(ctx context.Context, convoID, summary string) error
+	GetEvent(ctx context.Context, convoID, eventID string) (EventNode, error)
+	DeleteConversation(ctx context.Context, convoID string) error
+	DeleteSummary(ctx context.Context, convoID string) error
+}
+
 // ConversationRoot represents the root summary
 type ConversationRoot struct {
 	ConvoID  string   `json:"convo_id"`
@@ -95,16 +106,15 @@ func (r *RedisStore) StoreEvent(ctx context.Context, convoID, eventID, parentID,
 }
 
 // GetEvent retrieves an event
-func (r *RedisStore) GetEvent(ctx context.Context, convoID, eventID string) (EventNode, error) {
+func (r *RedisStore) GetEvent(ctx context.Context, convoID, eventID string) (event EventNode, err error) {
 	key := fmt.Sprintf("conversation:%s:event:%s", convoID, eventID)
 	data, err := r.Client.Get(ctx, key).Result()
 	if err != nil {
-		return EventNode{}, err
+		return event, err
 	}
 
-	var event EventNode
 	if err := json.Unmarshal([]byte(data), &event); err != nil {
-		return EventNode{}, err
+		return event, err
 	}
 
 	return event, nil

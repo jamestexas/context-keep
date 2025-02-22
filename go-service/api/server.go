@@ -18,7 +18,7 @@ import (
 
 // APIHandler manages API requests
 type APIHandler struct {
-	storage *redis.RedisStore
+	storage redis.Storage        // Accept the interface.
 	llm     llm.LLMClient        // Accept the interface.
 	memory  *redis.MemoryManager // ✅ Add this
 }
@@ -29,9 +29,15 @@ type StreamRequest struct {
 	EventText string `json:"event_text"`
 }
 
-// NewAPIHandler initializes APIHandler
-func NewAPIHandler(storage *redis.RedisStore, llmClient llm.LLMClient) *APIHandler {
-	memManager := redis.NewMemoryManager(storage) // ✅ Initialize MemoryManager
+// ChatRequest represents a request to the chat endpoint
+type ChatRequest struct {
+	ConvoID   string `json:"convo_id"`
+	EventText string `json:"event_text"`
+}
+
+// NewAPIHandler initializes APIHandler.
+func NewAPIHandler(storage redis.Storage, llmClient llm.LLMClient) *APIHandler {
+	memManager := redis.NewMemoryManager(storage)
 	return &APIHandler{
 		storage: storage,
 		llm:     llmClient,
@@ -57,14 +63,21 @@ func (h *APIHandler) Router() *chi.Mux {
 	// Routes
 	r.Get("/", h.HandleRoot)
 	r.Get("/summary/{convo_id}", h.HandleGetSummary)
+	r.Get("/summary", h.HandleGetSummary)                            // Handle missing convo_id
 	r.Get("/conversation/{convo_id}", h.HandleGetHierarchicalMemory) // ✅ Add this if missing
+	r.Get("/conversation", h.HandleGetHierarchicalMemory)            // Handle missing convo_id
+	r.Get("/model", h.HandleGetModel)                                // Add this route
 
 	r.Post("/store", h.HandleStoreEvent)
 	r.Get("/debug/conversation/{convo_id}", h.HandleDebugConversation)
-	r.Post("/chat", h.HandleChatStream)           // ✅ Updated to streaming
-	r.Post("/summarize", h.HandleSummarizeStream) // ✅ Updated to streaming
+	r.Get("/debug/conversation", h.HandleDebugConversation) // Handle missing convo_id
+	r.Post("/chat", h.HandleChat)                           // Non-streaming endpoint
+	r.Post("/chat/stream", h.HandleChatStream)              // Streaming endpoint
+	r.Post("/summarize", h.HandleSummarizeStream)           // ✅ Updated to streaming
 	r.Delete("/conversation/{convo_id}", h.HandleDeleteConversation)
+	r.Delete("/conversation", h.HandleDeleteConversation) // Handle missing convo_id
 	r.Delete("/delete/summary/{convo_id}", h.HandleDeleteSummary)
+	r.Delete("/delete/summary", h.HandleDeleteSummary) // Handle missing convo_id
 
 	return r
 }
@@ -144,38 +157,24 @@ func (h *APIHandler) HandleDebugConversation(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *APIHandler) HandleChat(w http.ResponseWriter, r *http.Request) {
-	req, err := decodeJSON[StreamRequest](r)
-	if err != nil {
+	var req ChatRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "Invalid request")
 		return
 	}
 
-	ctx := r.Context()
-
-	// Generate event ID
-	eventID := generateEventID()
-
-	// Assume conversation starts from root unless tracking parent
-	parentID := "root"
-
-	// Store event properly
-	if err := h.storage.StoreEvent(ctx, req.ConvoID, eventID, parentID, req.EventText, []string{}); err != nil {
-		writeError(w, http.StatusInternalServerError, "Failed to store event")
-		return
-	}
-
-	// Call LLM for response
-	llmResponse, err := h.llm.GetCompletion(ctx, llm.CompletionRequest{
-		Model:       llm.DefaultModel,
-		Messages:    []openai.ChatCompletionMessage{{Role: "user", Content: req.EventText}}, // ✅ Use OpenAI's struct
-		Temperature: 0.7,
-		Stream:      false,
+	resp, err := h.llm.GetCompletion(r.Context(), llm.CompletionRequest{
+		Model:    llm.DefaultModel,
+		Messages: []openai.ChatCompletionMessage{{Role: "user", Content: req.EventText}},
 	})
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "LLM error")
+		writeError(w, http.StatusInternalServerError, "Failed to generate response")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"response": llmResponse})
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"response": resp,
+	})
 }
 
 // ✅ HandleChatStream (Streaming LLM Chat)
@@ -356,7 +355,7 @@ func (h *APIHandler) HandleDeleteSummary(w http.ResponseWriter, r *http.Request)
 }
 
 // ✅ StartServer (Cleaner)
-func StartServer(port string, storage *redis.RedisStore, llmClient *llm.Client) {
+func StartServer(port string, storage redis.Storage, llmClient llm.LLMClient) {
 	handler := NewAPIHandler(storage, llmClient)
 	router := handler.Router()
 
