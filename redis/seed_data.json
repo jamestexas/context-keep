@@ -1,0 +1,19 @@
+{
+    "conversation:abc123:root": {
+        "convo_id": "abc123",
+        "summary": "A quick summary of our chat.",
+        "child_ids": [
+            "event1"
+        ]
+    },
+    "conversation:abc123:event:event1": {
+        "event_id": "event1",
+        "parent_id": "root",
+        "summary": "First message summary",
+        "content": [
+            "Hello, AI!",
+            "Hi, how can I help?"
+        ],
+        "child_ids": []
+    }
+}
