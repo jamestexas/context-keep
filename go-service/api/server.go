@@ -19,7 +19,7 @@ import (
 // APIHandler manages API requests
 type APIHandler struct {
 	storage *redis.RedisStore
-	llm     *llm.Client
+	llm     llm.LLMClient        // Accept the interface.
 	memory  *redis.MemoryManager // ✅ Add this
 }
 

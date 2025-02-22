@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"os"
 
 	chi "github.com/go-chi/chi/v5"
 	"github.com/jamestexas/context-keep/go-service/llm"
@@ -14,8 +15,7 @@ const ()
 type ContextKey string
 
 const (
-	ContextKeyConvoID ContextKey = "convoID" // ContextKeyConvoID is the context key for the conversation ID.
-
+	ContextKeyConvoID      ContextKey = "convoID"      // ContextKeyConvoID is the context key for the conversation ID.
 	ContextKeyCurrentModel ContextKey = "currentModel" // ContextKeyCurrentModel is the context key for the current model.
 
 )
@@ -37,7 +37,7 @@ func convoIDInjector(next http.Handler) http.Handler {
 // modelInjector middleware adds the current model to the request context.
 func modelInjector(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		model := llm.DefaultModel // Define the model variable
+		model := os.Getenv("LLM_MODEL")
 		if model == "" {
 			model = llm.DefaultModel
 		}
